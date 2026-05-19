@@ -25,6 +25,13 @@ type Mesh struct {
 	Rng      *rand.Rand
 
 	nodes []*Node
+
+	// partition assigns each node ID to a group label. Broadcasts only
+	// reach peers in the same group. nil = no partition (the default).
+	// When set, nodes whose ID is not in the map are considered to be
+	// in their own singleton partition (defensive — should not happen
+	// in well-formed scenarios).
+	partition map[string]int
 }
 
 type Node struct {
@@ -83,9 +90,46 @@ func (n *Node) PeerView() map[string]int {
 	return out
 }
 
+// SetPartition splits the mesh into the given groups. Broadcasts
+// after this point only reach peers in the same group. Pass the
+// complete partitioning — nodes not listed are assumed isolated.
+func (m *Mesh) SetPartition(groups [][]string) {
+	p := make(map[string]int, len(m.nodes))
+	for i, g := range groups {
+		for _, id := range g {
+			p[id] = i
+		}
+	}
+	// Nodes not listed get unique partition IDs starting after the
+	// supplied groups so they neither rejoin nor merge with others.
+	next := len(groups)
+	for _, n := range m.nodes {
+		if _, ok := p[n.ID]; !ok {
+			p[n.ID] = next
+			next++
+		}
+	}
+	m.partition = p
+}
+
+// HealPartition restores full connectivity. Peer views are NOT
+// reset — each node retains the last value it heard from each peer
+// until fresh gossip overwrites it.
+func (m *Mesh) HealPartition() { m.partition = nil }
+
+func (m *Mesh) canSee(a, b string) bool {
+	if m.partition == nil {
+		return true
+	}
+	return m.partition[a] == m.partition[b]
+}
+
 func (n *Node) broadcast() {
 	for _, peer := range n.mesh.nodes {
 		if peer.ID == n.ID {
+			continue
+		}
+		if !n.mesh.canSee(n.ID, peer.ID) {
 			continue
 		}
 		if n.mesh.LossProb > 0 && n.mesh.Rng != nil && n.mesh.Rng.Float64() < n.mesh.LossProb {

@@ -45,6 +45,25 @@ type Spec struct {
 
 	// Reweight tick interval inside each WCG limiter.
 	WCGTickEvery time.Duration
+
+	// Hooks are time-based mutations applied to the running fleet —
+	// e.g. partition the gossip mesh at t=20s, heal at t=40s. Empty
+	// in steady-state scenarios.
+	Hooks []Hook
+}
+
+// HookContext gives a scheduled hook access to the live simulator
+// state. Mesh is nil if the scenario is run under a non-WCG limiter
+// that does not build a gossip mesh.
+type HookContext struct {
+	Clock *sim.Clock
+	Mesh  *gossip.Mesh
+	Fleet *Fleet
+}
+
+type Hook struct {
+	At    time.Duration
+	Apply func(*HookContext)
 }
 
 // Result is the path of the CSV produced by a single run.
@@ -137,6 +156,14 @@ func Run(spec Spec, kind LimiterKind, outDir string, seed uint64) Result {
 	}
 	for _, w := range wcgInstances {
 		w.Start(spec.Duration)
+	}
+
+	// Schedule time-based hooks (partition, heal, etc.).
+	for _, h := range spec.Hooks {
+		h := h
+		clock.Schedule(h.At, func() {
+			h.Apply(&HookContext{Clock: clock, Mesh: mesh, Fleet: fleet})
+		})
 	}
 
 	// Workload: one generator per tenant, each picking targets at

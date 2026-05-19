@@ -140,6 +140,7 @@ func main() {
 		scenario.HeterogeneousCapacity,
 		scenario.NoisyTenant,
 		scenario.Shock,
+		scenario.Partition,
 	}
 
 	for _, specBuilder := range specs {
@@ -151,5 +152,36 @@ func main() {
 			res := scenario.Run(spec, kind, "results", seed)
 			fmt.Printf("wrote %s\n", res.CSVPath)
 		}
+	}
+
+	// Q3: gossip-interval sweep. Run noisy_tenant + WCG at a range of
+	// gossip intervals. Output one CSV per interval, embedding the
+	// interval in the filename for downstream analysis.
+	intervals := []time.Duration{
+		100 * time.Millisecond,
+		250 * time.Millisecond,
+		500 * time.Millisecond,
+		1 * time.Second,
+		2 * time.Second,
+		5 * time.Second,
+	}
+	for _, gi := range intervals {
+		rng := rand.New(rand.NewPCG(seed, 0xDEADBEEF))
+		spec := scenario.NoisyTenant(rng)
+		spec.Name = fmt.Sprintf("gossipsweep_noisy_%dms", gi.Milliseconds())
+		spec.GossipInterval = gi
+		res := scenario.Run(spec, scenario.KindWCG, "results", seed)
+		fmt.Printf("wrote %s\n", res.CSVPath)
+	}
+
+	// Same sweep on the shock scenario — gossip interval should matter
+	// here, since peers need fresh views of srv-c's collapsing capacity.
+	for _, gi := range intervals {
+		rng := rand.New(rand.NewPCG(seed, 0xDEADBEEF))
+		spec := scenario.Shock(rng)
+		spec.Name = fmt.Sprintf("gossipsweep_shock_%dms", gi.Milliseconds())
+		spec.GossipInterval = gi
+		res := scenario.Run(spec, scenario.KindWCG, "results", seed)
+		fmt.Printf("wrote %s\n", res.CSVPath)
 	}
 }

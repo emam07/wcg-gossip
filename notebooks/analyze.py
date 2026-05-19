@@ -62,9 +62,33 @@ def summarize_fleet(path: Path) -> dict:
     }
 
 
+def summarize_sweep(prefix: str) -> pd.DataFrame:
+    """Aggregate gossipsweep_<prefix>_<N>ms__wcg.csv files into per-interval rows."""
+    rows = []
+    for path in sorted(RESULTS_DIR.glob(f"scenario_gossipsweep_{prefix}_*ms__wcg.csv")):
+        # e.g. gossipsweep_noisy_500ms
+        stem = path.stem[len("scenario_") :]
+        # strip __wcg suffix
+        name = stem[: stem.index("__")]
+        ms = int(name.rsplit("_", 1)[1].rstrip("ms"))
+        s = summarize_fleet(path)
+        rows.append({
+            "interval_ms": ms,
+            "jain": s.get("jains_index", float("nan")),
+            "fleet_rps": s.get("fleet_goodput_rps", 0),
+            "p99_max_ms": s.get("p99_max_ms", 0),
+            "p99_mean_ms": s.get("p99_mean_ms", 0),
+            **{f"rps[{k}]": v for k, v in s.get("per_tenant_rps", {}).items()},
+        })
+    return pd.DataFrame(rows).sort_values("interval_ms").reset_index(drop=True)
+
+
 def main():
     rows = []
     for path in sorted(RESULTS_DIR.glob("scenario_*__*.csv")):
+        # Skip gossip-sweep CSVs — they get their own summary.
+        if path.stem.startswith("scenario_gossipsweep_"):
+            continue
         stem = path.stem  # scenario_<name>__<limiter>
         body = stem[len("scenario_") :]
         name, _, kind = body.partition("__")
@@ -81,10 +105,17 @@ def main():
             "rej_ovl": s.get("rejects_overload", 0),
         })
     summary = pd.DataFrame(rows)
+    print("=== Main scenarios ===")
     print(summary.to_string(index=False))
-    out = RESULTS_DIR / "summary.csv"
-    summary.to_csv(out, index=False)
-    print(f"\nwrote {out}")
+    summary.to_csv(RESULTS_DIR / "summary.csv", index=False)
+
+    for prefix in ("noisy", "shock"):
+        sweep = summarize_sweep(prefix)
+        print(f"\n=== Gossip-interval sweep ({prefix}) ===")
+        print(sweep.to_string(index=False))
+        sweep.to_csv(RESULTS_DIR / f"summary_gossipsweep_{prefix}.csv", index=False)
+
+    print(f"\nwrote {RESULTS_DIR / 'summary.csv'}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,54 @@ import (
 	"wcg-ratelimiter/internal/workload"
 )
 
+// Partition: 3 healthy servers. At t=20s the gossip mesh splits into
+// {srv-a, srv-b} vs {srv-c}; at t=40s the partition heals. Both
+// tenants offer steady load throughout. Measures whether each
+// partition stabilises at a fair per-partition allocation while
+// split, and how fast the fleet re-converges after heal.
+func Partition(rng *rand.Rand) Spec {
+	const splitAt = 20 * time.Second
+	const healAt = 40 * time.Second
+	return Spec{
+		Name: "partition",
+		Servers: []ServerSpec{
+			{ID: "srv-a", Workers: defaultWorkers, MaxQueue: defaultMaxQueue,
+				ServiceTime: DefaultServiceTime(rng, defaultBaseService, 1.0)},
+			{ID: "srv-b", Workers: defaultWorkers, MaxQueue: defaultMaxQueue,
+				ServiceTime: DefaultServiceTime(rng, defaultBaseService, 1.0)},
+			{ID: "srv-c", Workers: defaultWorkers, MaxQueue: defaultMaxQueue,
+				ServiceTime: DefaultServiceTime(rng, defaultBaseService, 1.0)},
+		},
+		Tenants: []TenantSpec{
+			{ID: "tA", GlobalBudget: 30, OfferedRate: workload.ConstantRate(30)},
+			{ID: "tB", GlobalBudget: 30, OfferedRate: workload.ConstantRate(30)},
+		},
+		Duration:       defaultDuration,
+		Sample:         defaultSample,
+		GossipInterval: 500 * time.Millisecond,
+		GossipDelay:    50 * time.Millisecond,
+		WCGTickEvery:   100 * time.Millisecond,
+		Hooks: []Hook{
+			{
+				At: splitAt,
+				Apply: func(ctx *HookContext) {
+					if ctx.Mesh != nil {
+						ctx.Mesh.SetPartition([][]string{{"srv-a", "srv-b"}, {"srv-c"}})
+					}
+				},
+			},
+			{
+				At: healAt,
+				Apply: func(ctx *HookContext) {
+					if ctx.Mesh != nil {
+						ctx.Mesh.HealPartition()
+					}
+				},
+			},
+		},
+	}
+}
+
 // Named scenarios from design doc §5. Each returns a Spec that can be
 // fed to Run() under any LimiterKind.
 

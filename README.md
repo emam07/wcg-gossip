@@ -64,6 +64,8 @@ Headline takeaways:
 - **Fairness.** WCG matches centralized per-tenant on Jain's index (0.998 vs 1.000) while being load-aware. Gradient2-alone is no fairer than no limiter at all (0.692 vs 0.693).
 - **Load awareness.** Under a slow server or sudden capacity shock, centralized limiters keep routing traffic blindly — fleet p99 reaches 16–18 seconds. WCG bounds p99 to under 2 seconds in both cases.
 - **No bottleneck.** Gossip carries one float per server per ~500 ms. No central store, no per-request RPC.
+- **Gossip is forgiving.** A 50× sweep from 100 ms to 5 s gossip interval degrades Jain's fairness by less than 0.4%. The algorithm tolerates substantial staleness.
+- **Survives partition.** Splitting the gossip mesh at t = 20 s and healing at t = 40 s shows no p99 meltdown; WCG under-admits ~6% during the split and recovers within one gossip interval.
 
 Full numbers, scenario descriptions, and caveats: [docs/results.md](docs/results.md).
 
@@ -111,9 +113,9 @@ wcg-gossip/
 ## Caveats
 
 - **This is a simulator, not a deployment.** All numbers come from a discrete-event simulation with idealized network and service-time models.
-- **Two design-doc experiments are not yet run** — gossip-interval sweep and network-partition. Both are listed under future work in `docs/results.md`.
 - **WCG matches Gradient2 on raw throughput / latency in load-aware-only scenarios.** Its win is the fairness layer; if you only have one of the two problems, simpler algorithms are easier to operate.
 - **`rtt_min` calibration matters.** The simulator uses `80 ms + uniform(0, 40 ms)` service times — low-variance, which is the workload Gradient2 was designed for. Heavy-tailed (exponential, log-normal) service times degrade the gradient signal and would need a percentile-based floor instead of a true min.
+- **Partition response is graceful, not active.** Under a static partition with steady offered load, WCG under-admits by ~6% in the partitioned-off node because stale peer views keep `C_total` artificially high. It recovers within one gossip interval after heal. A more aggressive scenario (asymmetric load during partition) would expose this more sharply — see [docs/results.md](docs/results.md) Q5.
 
 ## Inspired by
 

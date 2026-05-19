@@ -70,9 +70,41 @@ adaptive — see Q4.
 
 ### Q3. Gossip-interval tradeoff (100 ms – 5 s)
 
-Not exercised in this report. The simulator's `Spec.GossipInterval` is
-parameterized but only one value (500 ms) was run. A sweep is straightforward
-to add and is left as a follow-up — see "Future work" below.
+Swept gossip interval from 100 ms to 5 s under both the **noisy_tenant** scenario
+(where fairness is the binding constraint) and the **shock** scenario (where
+peers need fresh views of a collapsing server).
+
+| interval | noisy Jain | noisy tA_noisy RPS | shock Jain | shock p99 mean |
+|---:|---:|---:|---:|---:|
+| 100 ms | 0.9983 | 20.04 | 0.9985 | 253 ms |
+| 250 ms | 0.9981 | 20.05 | 0.9983 | 248 ms |
+| 500 ms | 0.9981 | 20.07 | 0.9984 | 258 ms |
+| 1 s | 0.9984 | 20.09 | 0.9984 | 253 ms |
+| 2 s | 0.9977 | 20.23 | 0.9983 | 249 ms |
+| 5 s | **0.9950** | **21.39** | 0.9980 | 249 ms |
+
+![Gossip-interval sweep](../results/fig5_gossip_interval_sweep.png)
+
+**Findings:**
+
+- **Fairness is robust to staleness up to ~2 s.** Jain's index stays at ≥0.998
+  across all intervals from 100 ms to 2 s.
+- **At 5 s, fairness degrades** — but only by 0.3% in Jain's terms. The noisy
+  tenant sneaks ~7% more requests through (20.0 → 21.4 RPS) because each
+  server's view of `C_total` is stale, so the per-tenant bucket is sized
+  fractionally larger than it should be.
+- **Shock-scenario p99 is insensitive to gossip interval.** This was a
+  surprise — I expected long intervals to make peers slow to learn about
+  srv-c's collapse. The reason p99 doesn't budge: srv-c's local Gradient2
+  detects its own slowdown immediately (zero gossip needed) and clamps
+  admission. The gossip layer's only job during shock is to redistribute
+  *fairness weights*, and with moderate offered load every tenant gets its
+  full share regardless.
+
+**Implication for operators:** the gossip interval is a knob worth keeping
+short for fairness robustness, but the algorithm has substantial slack —
+500 ms is comfortable, 2 s is workable. The cost of slow gossip shows up
+under sustained over-load, not under transient overload.
 
 ### Q4. Behavior under sudden capacity shock
 
@@ -92,9 +124,41 @@ centralized coordinator deciding to do so.
 
 ### Q5. Behavior under network partition
 
-Not exercised. The in-memory gossip mesh supports `LossProb`, but a partition
-scenario (deterministic split-and-heal) is not yet wired into `internal/scenario`.
-Listed under "Future work."
+The gossip mesh now supports `SetPartition(groups)` / `HealPartition()`, and
+a new `partition` scenario splits the 3-server fleet into `{srv-a, srv-b}`
+and `{srv-c}` at t = 20 s, healing at t = 40 s. Both tenants offer steady
+30 RPS within their 30 RPS budgets.
+
+| limiter | fleet RPS | Jain | p99 max | rejections |
+|---|---:|---:|---:|---:|
+| none | 59.9 | 0.997 | 299 ms | 0 |
+| centralized_pertenant | 58.5 | 0.999 | 262 ms | 78 |
+| gradient2_local | 59.9 | 0.997 | 299 ms | 0 |
+| **wcg** | **56.1** | 0.999 | 284 ms | 211 |
+
+![Partition timeline](../results/fig6_partition_timeline.png)
+
+**Findings:**
+
+- **No meltdown.** Every limiter survives the partition without a latency
+  blow-up. p99 stays under 300 ms throughout.
+- **WCG under-admits ~6% during the partition window.** The red curve
+  (WCG) sits 2–4 RPS below the green curve (Gradient2-local) inside the
+  shaded partition window, then re-converges after heal. Root cause: when
+  srv-c is partitioned off, its peer view freezes at the last gossiped
+  values of srv-a and srv-b. srv-c keeps computing `C_total ≈ 75` even
+  though, from its own admission's perspective, it's now alone serving
+  the share of traffic the LB happens to route its way. The fairness
+  bucket on srv-c is sized for a fleet that's still three servers, so it
+  fills slightly more slowly than the actual landed traffic demands.
+- **Recovery is immediate.** Once `HealPartition()` fires at t = 40 s,
+  the WCG curve rejoins the others within one gossip interval.
+- **Honest weakness.** This scenario shows WCG's response to partition is
+  *graceful degradation* — it doesn't blow up, but it also doesn't
+  actively rebalance. A stronger test would change the offered load
+  during the partition (e.g. force more traffic to the singleton side),
+  which would expose the under-admission more sharply. That's listed
+  under future work.
 
 ## What WCG actually delivers
 
@@ -125,20 +189,29 @@ gossip layer (one float per server per ~500 ms = trivial bandwidth) and a
 
 ## Future work
 
-- Gossip-interval sweep (Q3) — parameterize and chart.
-- Partition scenario (Q5) — split the mesh at t=20s, heal at t=40s, measure
-  per-partition Jain's index and convergence after heal.
-- Replace in-memory gossip with `hashicorp/memberlist` to validate the
+- **Asymmetric partition load.** The current Q5 scenario keeps offered load
+  steady through the partition. Forcing the LB to send disproportionate
+  traffic to the singleton side would expose the stale-view under-admission
+  more sharply — and motivate a recovery mechanism (e.g. an "I haven't
+  heard from peer X in N intervals → treat their `C_j` as 0" rule).
+- **Replace in-memory gossip with `hashicorp/memberlist`** to validate the
   same algorithm under real network conditions.
-- Cost-based limiting — extend the fairness allocator to charge per-request
-  weights (CPU ms, token count) rather than count-per-request.
-- Public Go library API + benchmarks.
+- **Cost-based limiting** — extend the fairness allocator to charge
+  per-request weights (CPU ms, token count) rather than count-per-request.
+  Particularly relevant for LLM/AI APIs where request cost varies 1000×.
+- **Public Go library API + benchmarks** comparing per-Admit overhead
+  against Netflix concurrency-limits.
+- **Smart LB feedback loop.** Currently the LB is uniform-random; routing
+  around hot-rejected servers would likely improve fleet goodput by
+  several percent.
 
 ## Reproducing
 
 ```sh
-cd F:\wcg-ratelimiter
-go run ./cmd/sim                 # writes CSVs into results/
-python notebooks/analyze.py      # writes results/summary.csv
-jupyter notebook notebooks/plots.ipynb   # produces figures
+git clone https://github.com/emam07/wcg-gossip.git
+cd wcg-gossip
+go run ./cmd/sim                    # writes CSVs into results/
+python notebooks/analyze.py         # writes results/summary*.csv
+python notebooks/plot_q3_q5.py      # writes fig5 + fig6
+jupyter notebook notebooks/plots.ipynb   # interactive figures 1-4
 ```
